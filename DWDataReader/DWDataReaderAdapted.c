@@ -2,20 +2,47 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #define MAX_CHANNELS 100
 #define MAX_CHANNEL_NAME 100
-#define OUTPUT_FILE "output.txt"
+
+// Función para normalizar la ruta (convertir \ a /)
+void normalize_path(char *path) {
+    for (int i = 0; path[i]; i++) {
+        if (path[i] == '\\') {
+            path[i] = '/';
+        }
+    }
+}
 
 int main(int argc, char *argv[]) {
     if (argc < 4) {
-        printf("Usage: %s <input_file.dxd> <channel_indices> <output_file>\n", argv[0]);
+        printf("Usage: %s <input_file.dxd> <channel_indices> <output_folder>\n", argv[0]);
         return 1;
     }
 
     const char *input_file = argv[1];
     const char *channel_indices = argv[2];
-    const char *output_file = argv[3];
+    const char *output_folder = argv[3];
+    char output_file[512]; // Buffer para el nombre del archivo de salida
+
+    // Normalizar la ruta del archivo de entrada
+    normalize_path((char *)input_file);
+
+    // Validar que la carpeta de salida existe o intentar crearla
+    struct stat st = {0};
+    if (stat(output_folder, &st) == -1) {
+#ifdef _WIN32
+        if (mkdir(output_folder) != 0) {
+#else
+        if (mkdir(output_folder, 0755) != 0) {
+#endif
+            perror("Error creando carpeta de salida");
+            return 1;
+        }
+    }
 
     if (!LoadDWDLL("DWDataReaderLib64.dll")) {
         printf("Could not load DWDataReaderLib64.dll\n");
@@ -48,6 +75,7 @@ int main(int argc, char *argv[]) {
     printf("Total channels: %d\n", num_channels);
     int selected_indices[MAX_CHANNELS] = {0};
     int selected_count = 0;
+    char channel_names[512] = ""; // Buffer para los nombres de los canales seleccionados
 
     // Parse the channel indices from the input
     char *token = strtok((char *)channel_indices, ",");
@@ -55,11 +83,35 @@ int main(int argc, char *argv[]) {
         int index = atoi(token);
         if (index >= 0 && index < num_channels) {
             selected_indices[selected_count++] = index;
+            strcat(channel_names, channels[index].name);
+            token = strtok(NULL, ",");
+            if (token) strcat(channel_names, "_"); // Separador entre nombres
         } else {
             printf("Invalid channel index: %d\n", index);
         }
-        token = strtok(NULL, ",");
     }
+
+    // Extraer el nombre base del archivo de entrada (sin ruta ni extensión)
+    char *filename = strrchr(input_file, '/');
+    if (!filename) filename = strrchr(input_file, '\\'); // Manejar rutas en Windows
+    if (filename) {
+        filename++; // Saltar la barra
+    } else {
+        filename = (char *)input_file; // Usar el input_file completo si no hay barra
+    }
+
+    // Eliminar la extensión del nombre base
+    char base_name[256];
+    strncpy(base_name, filename, sizeof(base_name) - 1);
+    base_name[sizeof(base_name) - 1] = '\0';
+    char *dot = strrchr(base_name, '.');
+    if (dot) *dot = '\0';
+
+    // Generar el nombre del archivo de salida
+    snprintf(output_file, sizeof(output_file), "%s/%s_%s.txt", output_folder, base_name, channel_names);
+
+    // Depuración: imprimir el nombre del archivo de salida
+    printf("Nombre del archivo de salida: %s\n", output_file);
 
     // Allocate memory for storing data for all selected channels
     double **data = malloc(selected_count * sizeof(double *));
@@ -69,7 +121,6 @@ int main(int argc, char *argv[]) {
         int channel_index = selected_indices[i];
         printf("Processing channel: %s\n", channels[channel_index].name);
 
-        // Get the number of samples for the channel
         sample_count = DWGetScaledSamplesCount(channels[channel_index].index);
         if (sample_count <= 0) {
             printf("Failed to get sample count for channel: %d\n", channel_index);
@@ -78,7 +129,6 @@ int main(int argc, char *argv[]) {
             return 1;
         }
 
-        // Allocate memory for data of the channel
         data[i] = malloc(sample_count * sizeof(double));
         if (!data[i]) {
             printf("Memory allocation failed\n");
@@ -87,7 +137,6 @@ int main(int argc, char *argv[]) {
             return 1;
         }
 
-        // Read scaled samples for the channel
         if (DWGetScaledSamples(channels[channel_index].index, 0, sample_count, data[i], NULL) != DWSTAT_OK) {
             printf("Failed to get scaled samples for channel: %s\n", channels[channel_index].name);
             free(data[i]);
@@ -108,24 +157,15 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Write the names of the sensors in the first row
-    for (int i = 0; i < selected_count; i++) {
-        fprintf(out_file, "%s", channels[selected_indices[i]].name);
-        if (i < selected_count - 1) {
-            fprintf(out_file, " "); // Add space between column names
-        }
-    }
-    fprintf(out_file, "\n"); // Add a newline after the header row
-
-    // Write data in tabular format
+    // Write data in tabular format (without headers)
     for (__int64 j = 0; j < sample_count; j++) {
         for (int i = 0; i < selected_count; i++) {
             fprintf(out_file, "%.12f", data[i][j]);
             if (i < selected_count - 1) {
-                fprintf(out_file, " "); // Add space between columns
+                fprintf(out_file, " "); // Espacio entre columnas
             }
         }
-        fprintf(out_file, "\n"); // Add a newline after each row
+        fprintf(out_file, "\n"); // Nueva línea después de cada fila
     }
 
     // Free allocated memory and close file
